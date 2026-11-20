@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "rewrites": [
+    { "source": "/health", "destination": "/api/index.js" },
+    { "source": "/docs", "destination": "/api/index.js" },
+    { "source": "/docs/(.*)", "destination": "/api/index.js" },
+    { "source": "/openapi.json", "destination": "/api/index.js" },
+    { "source": "/api/v1/(.*)", "destination": "/api/index.js" }
+  ]
+}
