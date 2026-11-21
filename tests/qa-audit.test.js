@@ -69,16 +69,25 @@ function collectRoutes(stack, prefix = '') {
   for (const layer of stack) {
     if (layer.route) {
       const methods = Object.keys(layer.route.methods).map((m) => m.toUpperCase());
-      for (const method of methods) {
-        routes.push(`${method} ${prefix}${layer.route.path}`);
+      const rawPaths = Array.isArray(layer.route.path)
+        ? layer.route.path
+        : [layer.route.path];
+      for (const routePath of rawPaths) {
+        const fullPath = `${prefix}${routePath}`.replace(/\/+/g, '/').replace(/\/$/, '') || '/';
+        for (const method of methods) {
+          routes.push(`${method} ${fullPath}`);
+        }
       }
     } else if (layer.name === 'router' && layer.handle?.stack) {
-      const match = layer.regexp
-        .toString()
-        .replace('/^\\', '')
-        .replace('\\/?(?=\\/|$)/i', '')
-        .replace(/\\\//g, '/');
-      const segment = match === '/' ? '' : match;
+      let segment = '';
+      if (!layer.regexp.fast_slash) {
+        const match = layer.regexp
+          .toString()
+          .replace('/^\\', '')
+          .replace('\\/?(?=\\/|$)/i', '')
+          .replace(/\\\//g, '/');
+        segment = match === '/' ? '' : match;
+      }
       routes.push(...collectRoutes(layer.handle.stack, `${prefix}${segment}`));
     }
   }
