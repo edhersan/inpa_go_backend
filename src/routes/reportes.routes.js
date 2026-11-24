@@ -28,12 +28,20 @@ router.get(
       }
 
       if (asignatura_id) {
+        const parsedAsig = Number(asignatura_id);
+        if (!Number.isInteger(parsedAsig) || parsedAsig <= 0) {
+          return sendError(res, 400, 'El parámetro asignatura_id debe ser un entero positivo.');
+        }
         conditions.push('a.asignatura_id = ?');
-        params.push(Number(asignatura_id));
+        params.push(parsedAsig);
       }
       if (grupo_id) {
+        const parsedGrupo = Number(grupo_id);
+        if (!Number.isInteger(parsedGrupo) || parsedGrupo <= 0) {
+          return sendError(res, 400, 'El parámetro grupo_id debe ser un entero positivo.');
+        }
         conditions.push('g.grupo_id = ?');
-        params.push(Number(grupo_id));
+        params.push(parsedGrupo);
       }
       if (fecha_desde) {
         conditions.push('sa.fecha >= ?');
@@ -87,16 +95,28 @@ router.get(
       const params = [req.user.usuario_id];
 
       if (asignatura_id) {
+        const parsedAsig = Number(asignatura_id);
+        if (!Number.isInteger(parsedAsig) || parsedAsig <= 0) {
+          return sendError(res, 400, 'El parámetro asignatura_id debe ser un entero positivo.');
+        }
         conditions.push('a.asignatura_id = ?');
-        params.push(Number(asignatura_id));
+        params.push(parsedAsig);
       }
       if (grupo_id) {
+        const parsedGrupo = Number(grupo_id);
+        if (!Number.isInteger(parsedGrupo) || parsedGrupo <= 0) {
+          return sendError(res, 400, 'El parámetro grupo_id debe ser un entero positivo.');
+        }
         conditions.push('g.grupo_id = ?');
-        params.push(Number(grupo_id));
+        params.push(parsedGrupo);
       }
       if (sesion_id) {
+        const parsedSesion = Number(sesion_id);
+        if (!Number.isInteger(parsedSesion) || parsedSesion <= 0) {
+          return sendError(res, 400, 'El parámetro sesion_id debe ser un entero positivo.');
+        }
         conditions.push('sa.sesion_id = ?');
-        params.push(Number(sesion_id));
+        params.push(parsedSesion);
       }
 
       const rows = await query(

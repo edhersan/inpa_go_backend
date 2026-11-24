@@ -253,6 +253,9 @@ test('Integración API: 27 endpoints + /health, pruebas negativas críticas y SL
     'PATCH /api/v1/asignaturas/:asignaturaId',
     'POST /api/v1/grupos',
     'PATCH /api/v1/grupos/:grupoId',
+    'GET /api/v1/grupos/:grupoId/estudiantes',
+    'POST /api/v1/grupos/:grupoId/estudiantes',
+    'DELETE /api/v1/grupos/:grupoId/estudiantes/:estudianteId',
     'GET /api/v1/configuracion/geocercas',
     'PUT /api/v1/configuracion/geocerca',
     'POST /api/v1/sesiones',
@@ -273,7 +276,7 @@ test('Integración API: 27 endpoints + /health, pruebas negativas críticas y SL
       `Falta el endpoint especificado: ${ep}`
     );
   }
-  assert.equal(expectedEndpoints.length, 28);
+  assert.equal(expectedEndpoints.length, 31);
 
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -470,7 +473,212 @@ test('Integración API: 27 endpoints + /health, pruebas negativas críticas y SL
       headers: { Authorization: `Bearer ${tokenEstudiante}` },
     });
     assert.equal(pdfForbidden.status, 403);
+
+    // 4.11 AppSec OWASP: Cabeceras HTTP endurecidas
+    assert.equal(healthRes.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(healthRes.headers.get('x-frame-options'), 'DENY');
+    assert.ok(
+      (healthRes.headers.get('strict-transport-security') || '').includes('max-age=31536000')
+    );
+
+    // 4.12 AppSec OWASP A01: Bloqueo de escalación de privilegios en auto-registro
+    const validJpegBytes = Buffer.from([
+      0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01,
+    ]);
+    const escalForm = new FormData();
+    escalForm.append('documento', '99999999');
+    escalForm.append('nombre_completo', 'Intento Admin');
+    escalForm.append('correo_institucional', 'escalacion@uninpahu.edu.co');
+    escalForm.append('password', 'ClaveSegura123!');
+    escalForm.append('rol_codigo', 'ADMIN_BIENESTAR');
+    escalForm.append('foto_perfil', new Blob([validJpegBytes], { type: 'image/jpeg' }), 'foto.jpg');
+    const escalRes = await fetch(`${baseUrl}/api/v1/auth/registro`, {
+      method: 'POST',
+      body: escalForm,
+    });
+    assert.equal(escalRes.status, 403);
+
+    // 4.13 AppSec OWASP A04/A08: Rechazo de archivo con MIME falsificado (magic bytes)
+    const spoofForm = new FormData();
+    spoofForm.append('documento', '88888888');
+    spoofForm.append('nombre_completo', 'Spoof Test');
+    spoofForm.append('correo_institucional', 'spoof@uninpahu.edu.co');
+    spoofForm.append('password', 'ClaveSegura123!');
+    spoofForm.append(
+      'foto_perfil',
+      new Blob([Buffer.from('<html><script>alert(1)</script></html>')], { type: 'image/jpeg' }),
+      'fake.jpg'
+    );
+    const spoofRes = await fetch(`${baseUrl}/api/v1/auth/registro`, {
+      method: 'POST',
+      body: spoofForm,
+    });
+    assert.equal(spoofRes.status, 400);
+
+    // 4.14 AppSec OWASP A01 (IDOR): Docente no puede confirmar asistencia de estudiante fuera del grupo
+    mockQueryHandler = async (sql) => {
+      if (sql.includes('FROM sesiones_academicas')) {
+        return [{ sesion_id: 7, grupo_id: 2, docente_id: 10, estado: 'ABIERTA' }];
+      }
+      if (sql.includes('FROM inscripciones_grupo')) {
+        return [{ estudiante_id: 20 }]; // Solo estudiante 20 está inscrito
+      }
+      return [];
+    };
+    const idorAsistRes = await fetch(`${baseUrl}/api/v1/sesiones/7/asistencias`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${tokenDocente}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        registros: [{ estudiante_id: 999, estado: 'PRESENTE' }],
+      }),
+    });
+    assert.equal(idorAsistRes.status, 403);
+
+    // 4.15 PATCH /api/v1/grupos/:grupoId valida rol DOCENTE activo y acepta activo booleano
+    mockQueryHandler = async (sql) => {
+      if (sql.includes("r.codigo = 'DOCENTE'")) {
+        return []; // docente inválido o inactivo
+      }
+      return { affectedRows: 1 };
+    };
+    const invalidDocenteRes = await fetch(`${baseUrl}/api/v1/grupos/2`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${tokenAdmin}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ docente_id: 999, activo: true }),
+    });
+    assert.equal(invalidDocenteRes.status, 400);
+
+    // 4.16 GET/POST/DELETE /api/v1/grupos/:grupoId/estudiantes (canManageGrupo RBAC + Ownership)
+    mockQueryHandler = async (sql) => {
+      if (sql.includes('SELECT grupo_id, docente_id, activo FROM grupos')) {
+        return [{ grupo_id: 2, docente_id: 99, activo: 1 }]; // Pertenece a otro docente (99 != 10)
+      }
+      return [];
+    };
+    const otherGroupGetRes = await fetch(`${baseUrl}/api/v1/grupos/2/estudiantes`, {
+      headers: { Authorization: `Bearer ${tokenDocente}` },
+    });
+    assert.equal(otherGroupGetRes.status, 403);
+
+    mockQueryHandler = async (sql) => {
+      if (sql.includes('SELECT grupo_id, docente_id, activo FROM grupos')) {
+        return [{ grupo_id: 2, docente_id: 10, activo: 1 }]; // Dueño docente 10
+      }
+      if (sql.includes("r.codigo = 'ESTUDIANTE'")) {
+        return [{ usuario_id: 20 }, { usuario_id: 21 }];
+      }
+      if (sql.includes('FROM inscripciones_grupo ig')) {
+        return [
+          {
+            usuario_id: 20,
+            documento: '1000123456',
+            codigo_institucional: 'EST-01',
+            nombre_completo: 'Ana Gómez',
+            correo_institucional: 'ana@uninpahu.edu.co',
+          },
+        ];
+      }
+      return { affectedRows: 1 };
+    };
+    const ownerGroupGetRes = await fetch(`${baseUrl}/api/v1/grupos/2/estudiantes`, {
+      headers: { Authorization: `Bearer ${tokenDocente}` },
+    });
+    assert.equal(ownerGroupGetRes.status, 200);
+    const ownerGroupGetJson = await ownerGroupGetRes.json();
+    assert.equal(ownerGroupGetJson.data.estudiantes[0].foto_url, '/api/v1/usuarios/20/foto');
+
+    const enrollRes = await fetch(`${baseUrl}/api/v1/grupos/2/estudiantes`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${tokenDocente}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ estudiante_ids: [20, 21] }),
+    });
+    assert.equal(enrollRes.status, 201);
+    const enrollJson = await enrollRes.json();
+    assert.equal(enrollJson.data.inscritos_procesados, 2);
+
+    const removeRes = await fetch(`${baseUrl}/api/v1/grupos/2/estudiantes/20`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${tokenDocente}` },
+    });
+    assert.equal(removeRes.status, 200);
+    const removeJson = await removeRes.json();
+    assert.equal(removeJson.data.estado, 'RETIRADO');
+
+    // 4.17 GET /api/v1/usuarios: directorio de estudiantes activos para DOCENTE y bloqueo de otros filtros
+    mockQueryHandler = async () => [
+      {
+        usuario_id: 20,
+        documento: '1000123456',
+        codigo_institucional: 'EST-01',
+        nombre_completo: 'Ana Gómez',
+        correo_institucional: 'ana@uninpahu.edu.co',
+      },
+    ];
+    const dirAllowedRes = await fetch(
+      `${baseUrl}/api/v1/usuarios?rol_codigo=ESTUDIANTE&activo=1`,
+      { headers: { Authorization: `Bearer ${tokenDocente}` } }
+    );
+    assert.equal(dirAllowedRes.status, 200);
+    const dirAllowedJson = await dirAllowedRes.json();
+    assert.deepEqual(Object.keys(dirAllowedJson.data.usuarios[0]), [
+      'usuario_id',
+      'documento',
+      'codigo_institucional',
+      'nombre_completo',
+      'correo_institucional',
+    ]);
+
+    const dirForbiddenRole = await fetch(
+      `${baseUrl}/api/v1/usuarios?rol_codigo=DOCENTE&activo=1`,
+      { headers: { Authorization: `Bearer ${tokenDocente}` } }
+    );
+    assert.equal(dirForbiddenRole.status, 403);
+
+    const dirForbiddenInactive = await fetch(
+      `${baseUrl}/api/v1/usuarios?rol_codigo=ESTUDIANTE&activo=0`,
+      { headers: { Authorization: `Bearer ${tokenDocente}` } }
+    );
+    assert.equal(dirForbiddenInactive.status, 403);
   } finally {
     await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+// =========================================================================
+// 5. Sanitización de Errores en Producción (OWASP A05)
+// =========================================================================
+test('AppSec: sendError oculta stack y detalles SQL en NODE_ENV=production', () => {
+  const { sendError } = require('../src/utils/response.util');
+  const prevEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'production';
+  try {
+    let capturedStatus = null;
+    let capturedBody = null;
+    const mockRes = {
+      status(code) {
+        capturedStatus = code;
+        return this;
+      },
+      json(body) {
+        capturedBody = body;
+        return this;
+      },
+    };
+    sendError(mockRes, 500, 'SQL Error: Unknown column in usuarios', 'Error: stack trace');
+    assert.equal(capturedStatus, 500);
+    assert.equal(capturedBody.success, false);
+    assert.equal(capturedBody.message, 'Error interno del servidor.');
+    assert.equal(capturedBody.errors, undefined);
+  } finally {
+    process.env.NODE_ENV = prevEnv;
   }
 });

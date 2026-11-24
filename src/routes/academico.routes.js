@@ -2,19 +2,32 @@ const express = require('express');
 const XLSX = require('xlsx');
 const { query, getConnection } = require('../config/db');
 const { authenticateJWT, authorizeRoles } = require('../middlewares/auth.middleware');
-const { uploadArchivoExcel } = require('../middlewares/upload.middleware');
+const {
+  uploadArchivoExcel,
+  detectExcelMagicBytes,
+} = require('../middlewares/upload.middleware');
 const { hashPassword } = require('../utils/crypto.util');
 const { sendSuccess, sendError } = require('../utils/response.util');
 
 const router = express.Router();
 
 const REQUIRED_EXCEL_COLUMNS = ['documento', 'nombre_completo', 'correo_institucional'];
+const MAX_EXCEL_ROWS = 1000;
+
+function sanitizeExcelCell(value) {
+  if (typeof value !== 'string') {
+    return value;
+  }
+  // Eliminar caracteres de control y prefijos peligrosos de CSV/Formula Injection (=, +, -, @, \t, \r)
+  const withoutControl = value.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '').trim();
+  return withoutControl.replace(/^[=+\-@\t\r]+/, '').trim();
+}
 
 function normalizeRowKeys(row) {
   const normalized = {};
   for (const [key, value] of Object.entries(row)) {
     const cleanKey = String(key).trim().toLowerCase();
-    normalized[cleanKey] = typeof value === 'string' ? value.trim() : value;
+    normalized[cleanKey] = typeof value === 'string' ? sanitizeExcelCell(value) : value;
   }
   return normalized;
 }
@@ -29,6 +42,15 @@ router.post(
     try {
       if (!req.file) {
         return sendError(res, 400, 'El archivo Excel (archivo_excel) es obligatorio.');
+      }
+
+      // Defensa en profundidad: verificar firma binaria ZIP/XLSX o OLE2/XLS antes de parsear
+      if (!detectExcelMagicBytes(req.file.buffer)) {
+        return sendError(
+          res,
+          400,
+          'El archivo cargado no posee una firma binaria ZIP/XLSX o XLS válida.'
+        );
       }
 
       const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
@@ -49,6 +71,15 @@ router.post(
           res,
           422,
           'La primera hoja del archivo Excel está vacía.'
+        );
+      }
+
+      if (rawRows.length > MAX_EXCEL_ROWS) {
+        return sendError(
+          res,
+          422,
+          `El archivo excede el límite máximo permitido de ${MAX_EXCEL_ROWS} filas por importación.`,
+          { max_filas: MAX_EXCEL_ROWS, filas_recibidas: rawRows.length }
         );
       }
 
@@ -473,20 +504,57 @@ router.patch(
       const params = [];
 
       if (docente_id !== undefined) {
+        const docenteId = Number(docente_id);
+        if (!Number.isInteger(docenteId) || docenteId <= 0) {
+          return sendError(res, 400, 'El campo docente_id debe ser un entero positivo.');
+        }
+
+        const docenteRows = await query(
+          `SELECT u.usuario_id
+           FROM usuarios u
+           INNER JOIN roles r ON u.rol_id = r.rol_id
+           WHERE u.usuario_id = ? AND u.activo = 1 AND r.codigo = 'DOCENTE'
+           LIMIT 1`,
+          [docenteId]
+        );
+        if (docenteRows.length === 0) {
+          return sendError(
+            res,
+            400,
+            'El docente_id especificado no existe, está inactivo o no tiene el rol DOCENTE.'
+          );
+        }
+
         updates.push('docente_id = ?');
-        params.push(Number(docente_id));
+        params.push(docenteId);
       }
       if (codigo_grupo !== undefined) {
+        const cleanCodigo = String(codigo_grupo).trim();
+        if (!cleanCodigo) {
+          return sendError(res, 400, 'El campo codigo_grupo no puede estar vacío.');
+        }
         updates.push('codigo_grupo = ?');
-        params.push(String(codigo_grupo).trim());
+        params.push(cleanCodigo);
       }
       if (periodo_academico !== undefined) {
+        const cleanPeriodo = String(periodo_academico).trim();
+        if (!cleanPeriodo) {
+          return sendError(res, 400, 'El campo periodo_academico no puede estar vacío.');
+        }
         updates.push('periodo_academico = ?');
-        params.push(String(periodo_academico).trim());
+        params.push(cleanPeriodo);
       }
       if (activo !== undefined) {
+        let activoVal;
+        if (typeof activo === 'boolean') {
+          activoVal = activo ? 1 : 0;
+        } else if (Number(activo) === 0 || Number(activo) === 1) {
+          activoVal = Number(activo);
+        } else {
+          return sendError(res, 400, 'El campo activo debe ser booleano, 1 o 0.');
+        }
         updates.push('activo = ?');
-        params.push(Number(activo) === 1 ? 1 : 0);
+        params.push(activoVal);
       }
 
       if (updates.length === 0) {
@@ -503,9 +571,22 @@ router.patch(
         return sendError(res, 404, 'Grupo no encontrado.');
       }
 
-      return sendSuccess(res, 200, 'Grupo actualizado exitosamente.', {
-        grupo_id: grupoId,
-      });
+      const updatedRows = await query(
+        `SELECT g.grupo_id, g.asignatura_id, g.docente_id, d.nombre_completo AS docente_nombre,
+                g.codigo_grupo, g.periodo_academico, g.activo
+         FROM grupos g
+         INNER JOIN usuarios d ON g.docente_id = d.usuario_id
+         WHERE g.grupo_id = ?
+         LIMIT 1`,
+        [grupoId]
+      );
+
+      return sendSuccess(
+        res,
+        200,
+        'Grupo actualizado exitosamente.',
+        updatedRows[0] || { grupo_id: grupoId }
+      );
     } catch (err) {
       if (err.code === 'ER_DUP_ENTRY') {
         return sendError(
@@ -516,6 +597,224 @@ router.patch(
         );
       }
       return sendError(res, 500, 'Error al actualizar grupo.', err.message);
+    }
+  }
+);
+
+// Helper reutilizable RBAC + Ownership para gestión de estudiantes en grupos
+async function canManageGrupo(user, grupoId) {
+  const rows = await query(
+    'SELECT grupo_id, docente_id, activo FROM grupos WHERE grupo_id = ? LIMIT 1',
+    [grupoId]
+  );
+  if (rows.length === 0) {
+    return { allowed: false, status: 404, message: 'Grupo académico no encontrado.' };
+  }
+  const grupo = rows[0];
+  if (user.rol_codigo === 'ADMIN_BIENESTAR') {
+    return { allowed: true, grupo };
+  }
+  if (user.rol_codigo === 'DOCENTE' && Number(grupo.docente_id) === Number(user.usuario_id)) {
+    return { allowed: true, grupo };
+  }
+  return {
+    allowed: false,
+    status: 403,
+    message: 'No tienes permisos para gestionar estudiantes en este grupo.',
+  };
+}
+
+// 14b. GET /api/v1/grupos/:grupoId/estudiantes (RF06 - ADMIN_BIENESTAR o DOCENTE dueño)
+router.get(
+  '/grupos/:grupoId/estudiantes',
+  authenticateJWT,
+  authorizeRoles('ADMIN_BIENESTAR', 'DOCENTE'),
+  async (req, res) => {
+    try {
+      const grupoId = Number(req.params.grupoId);
+      if (!Number.isInteger(grupoId) || grupoId <= 0) {
+        return sendError(res, 400, 'Identificador de grupo inválido.');
+      }
+
+      const authz = await canManageGrupo(req.user, grupoId);
+      if (!authz.allowed) {
+        return sendError(res, authz.status, authz.message);
+      }
+
+      const rows = await query(
+        `SELECT u.usuario_id, u.documento, u.codigo_institucional,
+                u.nombre_completo, u.correo_institucional
+         FROM inscripciones_grupo ig
+         INNER JOIN usuarios u ON ig.estudiante_id = u.usuario_id
+         WHERE ig.grupo_id = ? AND ig.estado = 'ACTIVO'
+         ORDER BY u.nombre_completo ASC`,
+        [grupoId]
+      );
+
+      const estudiantes = rows.map((row) => ({
+        ...row,
+        foto_url: `/api/v1/usuarios/${row.usuario_id}/foto`,
+      }));
+
+      return sendSuccess(res, 200, 'Estudiantes del grupo consultados exitosamente.', {
+        grupo_id: grupoId,
+        total: estudiantes.length,
+        estudiantes,
+      });
+    } catch (err) {
+      return sendError(res, 500, 'Error al consultar los estudiantes del grupo.', err.message);
+    }
+  }
+);
+
+// 14c. POST /api/v1/grupos/:grupoId/estudiantes (RF06, RNF03 - ADMIN_BIENESTAR o DOCENTE dueño)
+router.post(
+  '/grupos/:grupoId/estudiantes',
+  authenticateJWT,
+  authorizeRoles('ADMIN_BIENESTAR', 'DOCENTE'),
+  async (req, res) => {
+    try {
+      const grupoId = Number(req.params.grupoId);
+      if (!Number.isInteger(grupoId) || grupoId <= 0) {
+        return sendError(res, 400, 'Identificador de grupo inválido.');
+      }
+
+      const authz = await canManageGrupo(req.user, grupoId);
+      if (!authz.allowed) {
+        return sendError(res, authz.status, authz.message);
+      }
+
+      const { estudiante_id, estudiante_ids } = req.body || {};
+      const rawIds = [];
+      if (estudiante_id !== undefined && estudiante_id !== null) {
+        rawIds.push(estudiante_id);
+      }
+      if (Array.isArray(estudiante_ids)) {
+        rawIds.push(...estudiante_ids);
+      }
+
+      if (rawIds.length === 0) {
+        return sendError(
+          res,
+          400,
+          'Debe proporcionar estudiante_id o un arreglo no vacío en estudiante_ids.'
+        );
+      }
+
+      const parsedIds = [];
+      for (const rawId of rawIds) {
+        const id = Number(rawId);
+        if (!Number.isInteger(id) || id <= 0) {
+          return sendError(
+            res,
+            400,
+            'Todos los identificadores de estudiante deben ser enteros positivos.'
+          );
+        }
+        parsedIds.push(id);
+      }
+
+      const uniqueIds = [...new Set(parsedIds)];
+      if (uniqueIds.length > 500) {
+        return sendError(
+          res,
+          400,
+          'No se pueden inscribir más de 500 estudiantes en una sola petición.'
+        );
+      }
+
+      const placeholders = uniqueIds.map(() => '?').join(', ');
+      const validRows = await query(
+        `SELECT u.usuario_id
+         FROM usuarios u
+         INNER JOIN roles r ON u.rol_id = r.rol_id
+         WHERE u.usuario_id IN (${placeholders})
+           AND u.activo = 1
+           AND r.codigo = 'ESTUDIANTE'`,
+        uniqueIds
+      );
+
+      const validSet = new Set(validRows.map((r) => Number(r.usuario_id)));
+      const invalidIds = uniqueIds.filter((id) => !validSet.has(id));
+      if (invalidIds.length > 0) {
+        return sendError(
+          res,
+          400,
+          'Uno o más estudiantes no existen, están inactivos o no tienen el rol ESTUDIANTE.',
+          { estudiantes_invalidos: invalidIds }
+        );
+      }
+
+      const conn = await getConnection();
+      try {
+        await conn.beginTransaction();
+        for (const estId of uniqueIds) {
+          await conn.execute(
+            `INSERT INTO inscripciones_grupo (grupo_id, estudiante_id, estado)
+             VALUES (?, ?, 'ACTIVO')
+             ON DUPLICATE KEY UPDATE estado = 'ACTIVO'`,
+            [grupoId, estId]
+          );
+        }
+        await conn.commit();
+      } catch (txErr) {
+        await conn.rollback();
+        throw txErr;
+      } finally {
+        conn.release();
+      }
+
+      return sendSuccess(res, 201, 'Estudiantes inscritos en el grupo exitosamente.', {
+        grupo_id: grupoId,
+        inscritos_procesados: uniqueIds.length,
+        estudiante_ids: uniqueIds,
+      });
+    } catch (err) {
+      return sendError(res, 500, 'Error al inscribir estudiantes en el grupo.', err.message);
+    }
+  }
+);
+
+// 14d. DELETE /api/v1/grupos/:grupoId/estudiantes/:estudianteId (RF06 - ADMIN_BIENESTAR o DOCENTE dueño)
+router.delete(
+  '/grupos/:grupoId/estudiantes/:estudianteId',
+  authenticateJWT,
+  authorizeRoles('ADMIN_BIENESTAR', 'DOCENTE'),
+  async (req, res) => {
+    try {
+      const grupoId = Number(req.params.grupoId);
+      const estudianteId = Number(req.params.estudianteId);
+      if (!Number.isInteger(grupoId) || grupoId <= 0 || !Number.isInteger(estudianteId) || estudianteId <= 0) {
+        return sendError(res, 400, 'Identificadores de grupo o estudiante inválidos.');
+      }
+
+      const authz = await canManageGrupo(req.user, grupoId);
+      if (!authz.allowed) {
+        return sendError(res, authz.status, authz.message);
+      }
+
+      const result = await query(
+        `UPDATE inscripciones_grupo
+         SET estado = 'RETIRADO'
+         WHERE grupo_id = ? AND estudiante_id = ? AND estado = 'ACTIVO'`,
+        [grupoId, estudianteId]
+      );
+
+      if (result.affectedRows === 0) {
+        return sendError(
+          res,
+          404,
+          'El estudiante no cuenta con una inscripción activa en este grupo.'
+        );
+      }
+
+      return sendSuccess(res, 200, 'Inscripción del estudiante retirada del grupo exitosamente.', {
+        grupo_id: grupoId,
+        estudiante_id: estudianteId,
+        estado: 'RETIRADO',
+      });
+    } catch (err) {
+      return sendError(res, 500, 'Error al retirar al estudiante del grupo.', err.message);
     }
   }
 );

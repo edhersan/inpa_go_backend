@@ -546,9 +546,16 @@ router.put(
           'Debe enviar un arreglo no vacío en el campo registros.'
         );
       }
+      if (registros.length > 500) {
+        return sendError(
+          res,
+          400,
+          'El lote excede el máximo permitido de 500 registros por petición.'
+        );
+      }
 
       const sesionRows = await query(
-        'SELECT sesion_id, docente_id, estado FROM sesiones_academicas WHERE sesion_id = ? LIMIT 1',
+        'SELECT sesion_id, grupo_id, docente_id, estado FROM sesiones_academicas WHERE sesion_id = ? LIMIT 1',
         [sesionId]
       );
       if (sesionRows.length === 0) {
@@ -569,11 +576,16 @@ router.put(
       }
 
       for (const item of registros) {
-        if (!item.estudiante_id || !ESTADOS_ASISTENCIA_VALIDOS.has(item.estado)) {
+        const estudianteId = Number(item.estudiante_id);
+        if (
+          !Number.isInteger(estudianteId) ||
+          estudianteId <= 0 ||
+          !ESTADOS_ASISTENCIA_VALIDOS.has(item.estado)
+        ) {
           return sendError(
             res,
             400,
-            'Cada registro debe incluir estudiante_id y un estado válido (PRESENTE, AUSENTE, TARDE o EXCUSA).'
+            'Cada registro debe incluir estudiante_id válido y un estado permitido (PRESENTE, AUSENTE, TARDE o EXCUSA).'
           );
         }
         const metodo = item.metodo_confirmacion || 'VOZ_GPS_FOTO';
@@ -583,6 +595,55 @@ router.put(
             400,
             `Método de confirmación no válido: ${metodo}.`
           );
+        }
+        if (item.evidencia_id !== undefined && item.evidencia_id !== null) {
+          const evId = Number(item.evidencia_id);
+          if (!Number.isInteger(evId) || evId <= 0) {
+            return sendError(res, 400, 'Identificador de evidencia inválido.');
+          }
+        }
+      }
+
+      // Validación IDOR: verificar que todos los estudiantes pertenezcan activamente al grupo de la sesión
+      const enrolledRows = await query(
+        "SELECT estudiante_id FROM inscripciones_grupo WHERE grupo_id = ? AND estado = 'ACTIVO'",
+        [sesion.grupo_id]
+      );
+      const enrolledSet = new Set(enrolledRows.map((r) => Number(r.estudiante_id)));
+
+      for (const item of registros) {
+        const estId = Number(item.estudiante_id);
+        if (!enrolledSet.has(estId)) {
+          return sendError(
+            res,
+            403,
+            `El estudiante ${estId} no se encuentra inscrito activamente en el grupo de esta sesión.`
+          );
+        }
+      }
+
+      // Validación IDOR: si se envía evidencia_id, comprobar que corresponde a (sesionId, estudiante_id)
+      const itemsWithEvidence = registros.filter(
+        (item) => item.evidencia_id !== undefined && item.evidencia_id !== null
+      );
+      if (itemsWithEvidence.length > 0) {
+        const evidenceRows = await query(
+          'SELECT evidencia_id, estudiante_id FROM evidencias_asistencia WHERE sesion_id = ?',
+          [sesionId]
+        );
+        const evidenceOwnerMap = new Map(
+          evidenceRows.map((r) => [Number(r.evidencia_id), Number(r.estudiante_id)])
+        );
+        for (const item of itemsWithEvidence) {
+          const evId = Number(item.evidencia_id);
+          const estId = Number(item.estudiante_id);
+          if (evidenceOwnerMap.get(evId) !== estId) {
+            return sendError(
+              res,
+              400,
+              `La evidencia ${evId} no pertenece al estudiante ${estId} en esta sesión.`
+            );
+          }
         }
       }
 

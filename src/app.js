@@ -9,21 +9,33 @@ const { sendSuccess, sendError } = require('./utils/response.util');
 const app = express();
 
 app.set('trust proxy', 1);
+app.disable('x-powered-by');
 
-app.use(helmet());
+app.use(
+  helmet({
+    frameguard: { action: 'deny' },
+    noSniff: true,
+    hsts: {
+      maxAge: 31536000,
+      includeSubDomains: true,
+      preload: true,
+    },
+  })
+);
 
 const corsOrigin = process.env.CORS_ORIGIN || '*';
+const allowAllOrigins = corsOrigin === '*';
 app.use(
   cors({
-    origin: corsOrigin === '*' ? true : corsOrigin.split(',').map((o) => o.trim()),
-    credentials: true,
+    origin: allowAllOrigins ? '*' : corsOrigin.split(',').map((o) => o.trim()),
+    credentials: !allowAllOrigins,
   })
 );
 
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
-// Rate limit específico en login (RF01, RNF01): 40 peticiones cada 15 minutos
+// Rate limit en login (RF01, RNF01): 40 peticiones cada 15 minutos
 const loginRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 40,
@@ -37,7 +49,37 @@ const loginRateLimiter = rateLimit({
     ),
 });
 
+// Rate limit en registro público (OWASP A07): 15 peticiones cada 15 minutos
+const registroRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) =>
+    sendError(
+      res,
+      429,
+      'Demasiados intentos de registro desde esta dirección IP. Intente nuevamente en 15 minutos.'
+    ),
+});
+
+// Rate limit en renovación de token: 60 peticiones cada 15 minutos
+const refreshRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) =>
+    sendError(
+      res,
+      429,
+      'Demasiadas solicitudes de renovación de sesión. Intente nuevamente en unos minutos.'
+    ),
+});
+
 app.use('/api/v1/auth/login', loginRateLimiter);
+app.use('/api/v1/auth/registro', registroRateLimiter);
+app.use('/api/v1/auth/refresh', refreshRateLimiter);
 
 // 0. GET /health (Público)
 app.get('/health', (_req, res) => {
@@ -95,15 +137,15 @@ app.use((req, res) => {
   return sendError(res, 404, `Ruta no encontrada: ${req.method} ${req.originalUrl}`);
 });
 
-// Manejador global de errores
+// Manejador global de errores (sin exposición de stack ni detalles internos en producción)
 app.use((err, _req, res, _next) => {
   const statusCode = err.status || err.statusCode || 500;
-  return sendError(
-    res,
-    statusCode,
-    err.message || 'Error interno del servidor.',
-    process.env.NODE_ENV === 'production' ? undefined : err.stack
-  );
+  const isProd = process.env.NODE_ENV === 'production';
+  const message =
+    isProd && statusCode >= 500
+      ? 'Error interno del servidor.'
+      : err.message || 'Error interno del servidor.';
+  return sendError(res, statusCode, message, isProd ? undefined : err.stack);
 });
 
 module.exports = app;

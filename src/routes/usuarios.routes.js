@@ -97,44 +97,79 @@ router.post('/me/perfil-voz', authenticateJWT, uploadAudioVoz, async (req, res) 
   }
 });
 
-// 6. GET /api/v1/usuarios (RF03 - ADMIN_BIENESTAR)
-router.get('/', authenticateJWT, authorizeRoles('ADMIN_BIENESTAR'), async (req, res) => {
-  try {
-    const { rol_codigo, activo } = req.query;
-    const conditions = [];
-    const params = [];
+// 6. GET /api/v1/usuarios (RF03, RF06 - ADMIN_BIENESTAR o directorio de estudiantes activos para DOCENTE)
+router.get(
+  '/',
+  authenticateJWT,
+  authorizeRoles('ADMIN_BIENESTAR', 'DOCENTE'),
+  async (req, res) => {
+    try {
+      const { rol_codigo, activo } = req.query;
+      const requesterRol = req.user.rol_codigo;
 
-    if (rol_codigo) {
-      conditions.push('r.codigo = ?');
-      params.push(String(rol_codigo).trim().toUpperCase());
+      // Para DOCENTE: restringir exclusivamente a estudiantes activos y campos públicos de directorio
+      if (requesterRol === 'DOCENTE') {
+        const requestedRol = rol_codigo ? String(rol_codigo).trim().toUpperCase() : '';
+        const requestedActivo = activo !== undefined && activo !== '' ? Number(activo) : null;
+
+        if (requestedRol !== 'ESTUDIANTE' || requestedActivo !== 1) {
+          return sendError(
+            res,
+            403,
+            'El rol DOCENTE únicamente puede consultar el directorio de estudiantes activos (rol_codigo=ESTUDIANTE&activo=1).'
+          );
+        }
+
+        const rows = await query(
+          `SELECT u.usuario_id, u.documento, u.codigo_institucional,
+                  u.nombre_completo, u.correo_institucional
+           FROM usuarios u
+           INNER JOIN roles r ON u.rol_id = r.rol_id
+           WHERE r.codigo = 'ESTUDIANTE' AND u.activo = 1
+           ORDER BY u.nombre_completo ASC`
+        );
+
+        return sendSuccess(res, 200, 'Directorio de estudiantes activos consultado exitosamente.', {
+          total: rows.length,
+          usuarios: rows,
+        });
+      }
+
+      const conditions = [];
+      const params = [];
+
+      if (rol_codigo) {
+        conditions.push('r.codigo = ?');
+        params.push(String(rol_codigo).trim().toUpperCase());
+      }
+
+      if (activo !== undefined && activo !== '') {
+        conditions.push('u.activo = ?');
+        params.push(Number(activo) === 1 ? 1 : 0);
+      }
+
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+      const rows = await query(
+        `SELECT u.usuario_id, u.rol_id, r.codigo AS rol_codigo, r.nombre AS rol_nombre,
+                u.documento, u.codigo_institucional, u.nombre_completo, u.correo_institucional,
+                u.foto_hash_sha256, (u.perfil_voz_ruta IS NOT NULL) AS tiene_perfil_voz,
+                u.biometria_habilitada, u.activo, u.creado_en, u.actualizado_en
+         FROM usuarios u
+         INNER JOIN roles r ON u.rol_id = r.rol_id
+         ${whereClause}
+         ORDER BY u.usuario_id DESC`,
+        params
+      );
+
+      return sendSuccess(res, 200, 'Usuarios consultados exitosamente.', {
+        total: rows.length,
+        usuarios: rows,
+      });
+    } catch (err) {
+      return sendError(res, 500, 'Error al consultar usuarios.', err.message);
     }
-
-    if (activo !== undefined && activo !== '') {
-      conditions.push('u.activo = ?');
-      params.push(Number(activo) === 1 ? 1 : 0);
-    }
-
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const rows = await query(
-      `SELECT u.usuario_id, u.rol_id, r.codigo AS rol_codigo, r.nombre AS rol_nombre,
-              u.documento, u.codigo_institucional, u.nombre_completo, u.correo_institucional,
-              u.foto_hash_sha256, (u.perfil_voz_ruta IS NOT NULL) AS tiene_perfil_voz,
-              u.biometria_habilitada, u.activo, u.creado_en, u.actualizado_en
-       FROM usuarios u
-       INNER JOIN roles r ON u.rol_id = r.rol_id
-       ${whereClause}
-       ORDER BY u.usuario_id DESC`,
-      params
-    );
-
-    return sendSuccess(res, 200, 'Usuarios consultados exitosamente.', {
-      total: rows.length,
-      usuarios: rows,
-    });
-  } catch (err) {
-    return sendError(res, 500, 'Error al consultar usuarios.', err.message);
   }
-});
+);
 
 // 7. POST /api/v1/usuarios/docentes (RF03 - ADMIN_BIENESTAR)
 router.post(
@@ -300,7 +335,7 @@ router.get('/:usuarioId/foto', authenticateJWT, async (req, res) => {
           `SELECT 1
            FROM inscripciones_grupo ig
            INNER JOIN grupos g ON ig.grupo_id = g.grupo_id
-           WHERE ig.estudiante_id = ? AND g.docente_id = ?
+           WHERE ig.estudiante_id = ? AND g.docente_id = ? AND ig.estado = 'ACTIVO'
            LIMIT 1`,
           [targetUserId, requesterId]
         );

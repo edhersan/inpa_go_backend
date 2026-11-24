@@ -35,7 +35,10 @@ function signAccessToken(user) {
       correo_institucional: user.correo_institucional,
     },
     secret,
-    { expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '30m' }
+    {
+      algorithm: 'HS256',
+      expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '30m',
+    }
   );
 }
 
@@ -68,6 +71,15 @@ router.post('/registro', uploadFotoPerfil, async (req, res) => {
     }
 
     const normalizedRol = String(rol_codigo).trim().toUpperCase();
+    // Defensa OWASP A01: impedir escalación de privilegios en auto-registro público
+    if (normalizedRol !== 'ESTUDIANTE') {
+      return sendError(
+        res,
+        403,
+        'El auto-registro público solo está permitido para el rol ESTUDIANTE.'
+      );
+    }
+
     const rolesRows = await query(
       'SELECT rol_id, codigo FROM roles WHERE codigo = ? LIMIT 1',
       [normalizedRol]
@@ -98,13 +110,14 @@ router.post('/registro', uploadFotoPerfil, async (req, res) => {
 
     const passwordHash = await hashPassword(password);
     const fotoHash = sha256Buffer(req.file.buffer);
-    const ext = MIME_TO_EXT[req.file.mimetype] || 'jpg';
+    const verifiedMime = req.file.detectedMimeType || req.file.mimetype;
+    const ext = MIME_TO_EXT[verifiedMime] || 'jpg';
     const blobPathname = `fotos/${Date.now()}-${generateUuid()}.${ext}`;
 
     const storedPathname = await uploadPrivateBlob(
       blobPathname,
       req.file.buffer,
-      req.file.mimetype
+      verifiedMime
     );
 
     const insertResult = await query(
@@ -120,7 +133,7 @@ router.post('/registro', uploadFotoPerfil, async (req, res) => {
         cleanEmail,
         passwordHash,
         storedPathname,
-        req.file.mimetype,
+        verifiedMime,
         fotoHash,
       ]
     );

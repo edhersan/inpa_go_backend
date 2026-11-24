@@ -569,7 +569,7 @@ const openApiSpec = {
     '/api/v1/grupos/{grupoId}': {
       patch: {
         tags: ['2. Administración, Académico y Geocercas'],
-        summary: 'Actualizar grupo académico (ADMIN_BIENESTAR)',
+        summary: 'Actualizar grupo académico o asignar/cambiar docente (ADMIN_BIENESTAR)',
         security: [{ bearerAuth: [] }],
         parameters: [
           { name: 'grupoId', in: 'path', required: true, schema: { type: 'integer' } },
@@ -581,10 +581,10 @@ const openApiSpec = {
               schema: {
                 type: 'object',
                 properties: {
-                  docente_id: { type: 'integer' },
+                  docente_id: { type: 'integer', description: 'Debe corresponder a un usuario activo con rol DOCENTE' },
                   codigo_grupo: { type: 'string' },
                   periodo_academico: { type: 'string' },
-                  activo: { type: 'integer', enum: [0, 1] },
+                  activo: { oneOf: [{ type: 'boolean' }, { type: 'integer', enum: [0, 1] }] },
                 },
               },
             },
@@ -593,6 +593,85 @@ const openApiSpec = {
         responses: {
           200: {
             description: 'Grupo actualizado',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/SuccessResponse' } },
+            },
+          },
+          400: { $ref: '#/components/responses/BadRequest' },
+          403: { $ref: '#/components/responses/Forbidden' },
+          404: { $ref: '#/components/responses/NotFound' },
+        },
+      },
+    },
+    '/api/v1/grupos/{grupoId}/estudiantes': {
+      get: {
+        tags: ['2. Administración, Académico y Geocercas'],
+        summary: 'Listar estudiantes inscritos activamente en un grupo (ADMIN_BIENESTAR o DOCENTE dueño)',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { name: 'grupoId', in: 'path', required: true, schema: { type: 'integer' } },
+        ],
+        responses: {
+          200: {
+            description: 'Listado de estudiantes del grupo con foto_url',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/SuccessResponse' } },
+            },
+          },
+          403: { $ref: '#/components/responses/Forbidden' },
+          404: { $ref: '#/components/responses/NotFound' },
+        },
+      },
+      post: {
+        tags: ['2. Administración, Académico y Geocercas'],
+        summary: 'Inscribir uno o varios estudiantes en un grupo de forma idempotente (ADMIN_BIENESTAR o DOCENTE dueño)',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { name: 'grupoId', in: 'path', required: true, schema: { type: 'integer' } },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  estudiante_id: { type: 'integer', example: 20 },
+                  estudiante_ids: {
+                    type: 'array',
+                    items: { type: 'integer' },
+                    example: [20, 21, 22],
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          201: {
+            description: 'Estudiantes inscritos exitosamente',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/SuccessResponse' } },
+            },
+          },
+          400: { $ref: '#/components/responses/BadRequest' },
+          403: { $ref: '#/components/responses/Forbidden' },
+          404: { $ref: '#/components/responses/NotFound' },
+        },
+      },
+    },
+    '/api/v1/grupos/{grupoId}/estudiantes/{estudianteId}': {
+      delete: {
+        tags: ['2. Administración, Académico y Geocercas'],
+        summary: 'Retirar/desactivar la inscripción de un estudiante en un grupo (ADMIN_BIENESTAR o DOCENTE dueño)',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { name: 'grupoId', in: 'path', required: true, schema: { type: 'integer' } },
+          { name: 'estudianteId', in: 'path', required: true, schema: { type: 'integer' } },
+        ],
+        responses: {
+          200: {
+            description: 'Inscripción retirada exitosamente',
             content: {
               'application/json': { schema: { $ref: '#/components/schemas/SuccessResponse' } },
             },

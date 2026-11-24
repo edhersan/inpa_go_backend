@@ -18,7 +18,7 @@ function authenticateJWT(req, res, next) {
       return sendError(res, 500, 'Configuración JWT_ACCESS_SECRET ausente en el servidor.');
     }
 
-    const decoded = jwt.verify(token, secret);
+    const decoded = jwt.verify(token, secret, { algorithms: ['HS256'] });
     req.user = {
       usuario_id: decoded.usuario_id,
       rol_id: decoded.rol_id,
@@ -27,7 +27,8 @@ function authenticateJWT(req, res, next) {
     };
     return next();
   } catch (err) {
-    return sendError(res, 401, 'Token de acceso inválido o expirado.', err.message);
+    const detail = process.env.NODE_ENV === 'production' ? undefined : err.message;
+    return sendError(res, 401, 'Token de acceso inválido o expirado.', detail);
   }
 }
 

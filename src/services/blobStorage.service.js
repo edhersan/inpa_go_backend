@@ -11,8 +11,25 @@ function getBlobToken() {
   return token;
 }
 
+function assertSafeBlobPathname(pathname) {
+  if (typeof pathname !== 'string' || !pathname.trim()) {
+    throw new Error('Ruta de archivo en Vercel Blob inválida.');
+  }
+  const clean = pathname.trim();
+  if (
+    clean.startsWith('/') ||
+    clean.includes('..') ||
+    clean.includes('\\') ||
+    /[\x00-\x1f]/.test(clean)
+  ) {
+    throw new Error('Ruta de archivo en Vercel Blob rechazada por validación de seguridad.');
+  }
+  return clean;
+}
+
 async function uploadPrivateBlob(pathname, buffer, contentType) {
-  const blob = await put(pathname, buffer, {
+  const safePath = assertSafeBlobPathname(pathname);
+  const blob = await put(safePath, buffer, {
     access: 'private',
     contentType,
     addRandomSuffix: false,
@@ -26,7 +43,8 @@ async function getPrivateBlobStream(pathname) {
     return null;
   }
 
-  const result = await get(pathname, {
+  const safePath = assertSafeBlobPathname(pathname);
+  const result = await get(safePath, {
     access: 'private',
     token: getBlobToken(),
   });
@@ -59,12 +77,14 @@ async function deletePrivateBlob(pathname) {
   if (!pathname) {
     return;
   }
-  await del(pathname, {
+  const safePath = assertSafeBlobPathname(pathname);
+  await del(safePath, {
     token: getBlobToken(),
   });
 }
 
 module.exports = {
+  assertSafeBlobPathname,
   uploadPrivateBlob,
   getPrivateBlobStream,
   getPrivateBlobBuffer,
